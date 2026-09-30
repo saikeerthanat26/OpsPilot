@@ -1,9 +1,9 @@
 from copy import deepcopy
 
 class InfrastructureSimulator:
-    def __init__(self, fail_validation=False):
+    def __init__(self, fail_validation=False, tenant_id="platform-sre"):
         self.fail_validation=fail_validation
-        self.hosts={"prod-api-01":{"environment":"production","cpu":94,"memory":61,"health":"degraded","package":"openssl","version":"3.1.2","target_version":"3.1.4","vulnerabilities":["CVE-DEMO-2026-001"],"maintenance_window":True}}
+        self.hosts={"prod-api-01":{"tenant_id":tenant_id,"environment":"production","cpu":94,"memory":61,"health":"degraded","package":"openssl","version":"3.1.2","target_version":"3.1.4","vulnerabilities":["CVE-DEMO-2026-001"],"maintenance_window":True}}
         self.snapshots={}
     def get_host(self, host_id):
         if host_id not in self.hosts: raise KeyError(f"unknown host {host_id}")

@@ -1,5 +1,8 @@
 import uuid
 
+from app.security.approvals import ApprovalStore
+from app.observability.tracing import Trace
+
 from app.domain.models import Status
 from app.platform.enterprise import (
     CapabilityRegistry,
@@ -18,6 +21,7 @@ class EnterpriseOpsWorkflow:
         self.store = store or DurableRunStore()
         self.registry = CapabilityRegistry()
         self.router = ModelRouter()
+        self.approvals = ApprovalStore(self.store)
 
     def investigate(
         self,
@@ -26,6 +30,8 @@ class EnterpriseOpsWorkflow:
         cve,
         agent_id="sre-investigator",
         inject_failure=False,
+        *,
+        identity=None,
     ):
         """
         Execute the investigation portion through LangGraph.
@@ -35,6 +41,8 @@ class EnterpriseOpsWorkflow:
         DurableRunStore owns persisted workflow state.
         """
 
+        if identity is not None and identity.tenant_id != tenant_id:
+            raise PermissionError("caller tenant mismatch")
         run_id = str(uuid.uuid4())
 
         result = run_investigation(
@@ -44,6 +52,7 @@ class EnterpriseOpsWorkflow:
             cve=cve,
             agent_id=agent_id,
             inject_failure=inject_failure,
+            identity=identity,
         )
 
         status = (
@@ -77,12 +86,14 @@ class EnterpriseOpsWorkflow:
             payload,
         )
 
-        return self.store.get(run_id)
+        return self.store.get(run_id, tenant_id)
 
     def approve_and_execute(
         self,
         run_id,
         approver,
+        *,
+        tenant_id,
     ):
         """
         Resume a persisted WAITING_APPROVAL workflow.
@@ -105,42 +116,39 @@ class EnterpriseOpsWorkflow:
         Infrastructure mutations still pass through ToolGateway.
         """
 
-        record = self.store.get(run_id)
-
+        record = self.store.get(run_id, tenant_id)
         if not record:
             raise KeyError("run not found")
-
-        if (
-            record["status"]
-            != Status.WAITING_APPROVAL.value
-        ):
-            raise ValueError(
-                f"run is {record['status']}, "
-                "not WAITING_APPROVAL"
+        plan = record["payload"]["plan"]
+        if self.simulator.get_host(plan["host_id"])["tenant_id"] != tenant_id:
+            raise PermissionError("host belongs to another tenant")
+        approval_token = self.approvals.claim(run_id, tenant_id, approver)
+        if approval_token is None:
+            return self.store.get(run_id, tenant_id)
+        record = self.store.get(run_id, tenant_id)
+        self.simulator.fail_validation = record["payload"].get("inject_failure", False)
+        execution_trace = Trace()
+        try:
+            result = run_execution(
+                simulator=self.simulator,
+                tenant_id=tenant_id,
+                plan=plan,
+                approver=approver,
+                approval_token=approval_token,
+                approvals=self.approvals,
+                run_id=run_id,
+                trace=execution_trace,
             )
-
-        from simulator.infrastructure import (
-            InfrastructureSimulator,
-        )
-
-        simulator = InfrastructureSimulator(
-            record["payload"].get(
-                "inject_failure",
-                False,
-            )
-        )
-
-        approval_token = (
-            f"approved:{approver}:{uuid.uuid4()}"
-        )
-
-        result = run_execution(
-            simulator=simulator,
-            tenant_id=record["tenant_id"],
-            plan=record["payload"]["plan"],
-            approver=approver,
-            approval_token=approval_token,
-        )
+        except Exception:
+            # Do not resume/retry a possibly completed mutation after transport failure.
+            record["payload"]["operations"] = self.approvals.operations(run_id)
+            record["payload"]["events"] += execution_trace.events
+            record["payload"]["events"].append({
+                "ts": self.store.timestamp(), "event": "incident.escalated",
+                "detail": "execution interrupted; reconciliation required",
+            })
+            self.store.save(run_id, tenant_id, Status.ESCALATED.value, record["autonomy"], record["payload"])
+            raise
 
         if result["status"] == "SUCCEEDED":
             status = Status.SUCCEEDED
@@ -160,13 +168,6 @@ class EnterpriseOpsWorkflow:
             result["trace"].events
         )
 
-        record["payload"]["approval"] = {
-            "approver": approver,
-            "token_id": (
-                approval_token.split(":")[-1]
-            ),
-        }
-
         record["payload"]["postcheck"] = (
             result["postcheck"]
         )
@@ -175,7 +176,8 @@ class EnterpriseOpsWorkflow:
             "execution_orchestrator"
         ] = "langgraph"
 
-        self.store.save(
+        record["payload"]["operations"] = self.approvals.operations(run_id)
+        self.approvals.complete(
             run_id,
             record["tenant_id"],
             status.value,
@@ -183,4 +185,4 @@ class EnterpriseOpsWorkflow:
             record["payload"],
         )
 
-        return self.store.get(run_id)
+        return self.store.get(run_id, tenant_id)

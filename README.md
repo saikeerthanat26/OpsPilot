@@ -81,3 +81,30 @@ python -m pytest -q
 
 See [ADR-005](docs/adr/ADR-005-mcp-capability-boundary.md) for the trust model,
 transport choices and remaining production authorization requirements.
+
+## V0.5 — approval security and tenant isolation
+
+Enterprise mutations now require expiring, run/plan/executor-bound approval grants.
+ToolGateway enforces host ownership for reads and writes. Durable operation reservations
+and host leases suppress duplicate execution; repeated completed approvals return the
+saved outcome. Uncertain failures escalate and remain blocked for reconciliation.
+
+All `/v2` routes now require an authenticated local bearer principal. To run the local
+API, generate a credential and configure its trusted claims in the same terminal:
+
+```bash
+export OPSPILOT_DEMO_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export OPSPILOT_API_IDENTITIES="$(python -c 'import json, os; print(json.dumps({os.environ["OPSPILOT_DEMO_TOKEN"]: {"subject": "local-oncall", "tenant_id": "platform-sre", "roles": ["observer", "approver"], "environment_scopes": ["production"]}}))')"
+uvicorn app.api.main:app --reload
+```
+
+The demo host belongs to `platform-sre`. Use the generated token with the Swagger UI's
+**Authorize** control, or the `Authorization: Bearer <token>` header. Create an incident
+with `{}` at `POST /v2/incidents`, then send `{}` to `POST /v2/runs/<run_id>/approve`.
+Approver identity comes from the bearer principal; caller-supplied `approver` or
+`agent_id` fields are rejected. Without identity configuration, `/v2` denies access.
+
+Run `python -m pytest -q` and `python -m evals.run_evals` to verify security and both
+legacy/enterprise patch and rollback scenarios. Use TLS and replace the local identity
+resolver with OIDC before remote deployment. See
+[ADR-006](docs/adr/ADR-006-approval-grants-tenant-isolation.md) for recovery and storage limits.

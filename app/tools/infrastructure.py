@@ -3,6 +3,7 @@ from simulator.infrastructure import InfrastructureSimulator
 class InfrastructureTools:
     """Narrow capabilities. Intentionally no generic shell execution."""
     def __init__(self, sim: InfrastructureSimulator): self.sim=sim
+    def get_host_tenant(self, host_id): return self.sim.get_host(host_id)["tenant_id"]
     def get_host_health(self, host_id):
         h=self.sim.get_host(host_id); return {"cpu":h["cpu"],"memory":h["memory"],"health":h["health"],"environment":h["environment"]}
     def list_vulnerabilities(self, host_id): return self.sim.get_host(host_id)["vulnerabilities"]

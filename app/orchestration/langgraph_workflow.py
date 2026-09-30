@@ -28,6 +28,9 @@ class OpsPilotState(TypedDict, total=False):
 
     # Runtime dependencies
     simulator: Any
+    approvals: Any
+    run_id: str
+    trusted_identity: Any
     trace: Any
 
     # Investigation context
@@ -64,10 +67,10 @@ class OpsPilotState(TypedDict, total=False):
 def investigate(state: OpsPilotState) -> dict:
     trace = state["trace"]
 
-    identity = AgentIdentity(
+    identity = state.get("trusted_identity") or AgentIdentity(
         state.get("agent_id", "sre-investigator"),
         state["tenant_id"],
-        ("observer", "operator"),
+        ("observer",),
         ("production", "nonproduction"),
     )
 
@@ -331,6 +334,7 @@ def execute_patch(
         tools,
         CapabilityRegistry(),
         state["trace"],
+        approvals=state.get("approvals"), run_id=state.get("run_id"),
     )
 
     plan = state["plan"]
@@ -361,6 +365,7 @@ def verify_health(
         tools,
         CapabilityRegistry(),
         state["trace"],
+        approvals=state.get("approvals"), run_id=state.get("run_id"),
     )
 
     health = gateway.invoke(
@@ -411,6 +416,7 @@ def rollback(
         tools,
         CapabilityRegistry(),
         state["trace"],
+        approvals=state.get("approvals"), run_id=state.get("run_id"),
     )
 
     result = gateway.invoke(
@@ -606,6 +612,7 @@ def run_investigation(
     cve: str,
     agent_id: str = "sre-investigator",
     inject_failure: bool = False,
+    identity=None,
 ):
 
     trace = Trace()
@@ -615,6 +622,7 @@ def run_investigation(
         "host_id": host_id,
         "cve": cve,
         "agent_id": agent_id,
+        "trusted_identity": identity,
         "inject_failure": inject_failure,
         "simulator": simulator,
         "trace": trace,
@@ -632,15 +640,20 @@ def run_execution(
     plan: dict[str, Any],
     approver: str,
     approval_token: str,
+    approvals,
+    run_id: str,
+    trace=None,
 ):
 
-    trace = Trace()
+    trace = trace or Trace()
 
     initial_state: OpsPilotState = {
         "tenant_id": tenant_id,
         "plan": plan,
         "approver": approver,
         "approval_token": approval_token,
+        "approvals": approvals,
+        "run_id": run_id,
         "approved": True,
         "simulator": simulator,
         "trace": trace,
