@@ -2,6 +2,9 @@
 
 Status: Accepted for V0.4 reference implementation
 
+V0.5 adds durable approval validation and tenant ownership enforcement; see
+[ADR-006](ADR-006-approval-grants-tenant-isolation.md). The limits below describe V0.4.
+
 ## Decision
 
 Enterprise LangGraph nodes use `MCPToolGateway` for every infrastructure capability,

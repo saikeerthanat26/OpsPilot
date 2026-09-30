@@ -16,12 +16,13 @@ class MCPToolError(RuntimeError):
 
 
 class MCPToolGateway:
-    def __init__(self, tools, registry, trace, timeout_seconds=10):
+    def __init__(self, tools, registry, trace, timeout_seconds=10, *, approvals=None, run_id=None):
         self.tools, self.registry, self.trace = tools, registry, trace
         self.timeout_seconds = timeout_seconds
+        self.approvals, self.run_id = approvals, run_id
 
     async def invoke_async(self, identity, capability, *, approval_token=None, **arguments):
-        server = create_server(self.tools, identity, self.trace, approval_token)
+        server = create_server(self.tools, identity, self.trace, approval_token, approvals=self.approvals, run_id=self.run_id)
         self.trace.add("mcp.call.started", f"capability={capability}")
         try:
             async with asyncio.timeout(self.timeout_seconds):

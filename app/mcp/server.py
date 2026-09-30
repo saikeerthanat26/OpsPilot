@@ -14,10 +14,10 @@ from app.tools.infrastructure import InfrastructureTools
 from simulator.infrastructure import InfrastructureSimulator
 
 
-def create_server(tools, identity, trace, approval_token=None):
-    server = Server("opspilot-infrastructure", version="0.4.0")
+def create_server(tools, identity, trace, approval_token=None, *, approvals=None, run_id=None):
+    server = Server("opspilot-infrastructure", version="0.5.0")
     registry = CapabilityRegistry()
-    gateway = ToolGateway(tools, registry, trace)
+    gateway = ToolGateway(tools, registry, trace, approvals=approvals, run_id=run_id)
 
     @server.list_tools()
     async def list_tools():
@@ -67,7 +67,7 @@ async def main():
     # Standalone local server is read-only. No caller-supplied identities or approvals.
     server = create_server(
         InfrastructureTools(InfrastructureSimulator()),
-        AgentIdentity("mcp-local-observer", "local-demo", ("observer",), ("production",)),
+        AgentIdentity("mcp-local-observer", "platform-sre", ("observer",), ("production",)),
         Trace(),
     )
     async with stdio_server() as (read, write):

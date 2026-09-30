@@ -15,7 +15,7 @@ from simulator.infrastructure import InfrastructureSimulator
 
 
 def identity(roles=("observer", "operator"), scopes=("production",)):
-    return AgentIdentity("test-agent", "team-a", roles, scopes)
+    return AgentIdentity("sre-executor", "platform-sre", roles, scopes)
 
 
 def gateway(sim, trace=None):
@@ -60,17 +60,17 @@ def test_server_denies_mutation_without_authority(agent, token):
 def test_mcp_execution_verification_and_rollback_share_state():
     sim = InfrastructureSimulator(fail_validation=True)
     trace = Trace()
-    client = gateway(sim, trace)
-    client.invoke(identity(), "execute_approved_patch", approval_token="approved:test",
+    client, token = approved_gateway(sim, trace)
+    client.invoke(identity(), "execute_approved_patch", approval_token=token,
                   host_id="prod-api-01", to_version="3.1.4")
     assert sim.get_host("prod-api-01")["version"] == "3.1.4"
     assert client.invoke(identity(), "verify_host_health", host_id="prod-api-01")["healthy"] is False
     with pytest.raises(MCPToolError):
         client.invoke(identity(), "rollback_patch", host_id="prod-api-01")
-    client.invoke(identity(), "rollback_patch", approval_token="approved:test", host_id="prod-api-01")
+    client.invoke(identity(), "rollback_patch", approval_token=token, host_id="prod-api-01")
     assert sim.get_host("prod-api-01")["version"] == "3.1.2"
     assert any(e["event"] == "mcp.call.completed" for e in trace.events)
-    assert "approved:test" not in str(trace.events)
+    assert token not in str(trace.events)
 
 
 def test_unknown_host_error_is_sanitized():
@@ -129,9 +129,23 @@ def test_backend_failure_does_not_leak_credentials():
             raise RuntimeError(f"backend secret: {approval_token}")
 
     trace = Trace()
-    client = MCPToolGateway(BrokenTools(InfrastructureSimulator()), CapabilityRegistry(), trace)
+    client, token = approved_gateway(InfrastructureSimulator(), trace, BrokenTools)
     with pytest.raises(MCPToolError, match="execution_failed") as error:
-        client.invoke(identity(), "execute_approved_patch", approval_token="sensitive-approval",
+        client.invoke(identity(), "execute_approved_patch", approval_token=token,
                       host_id="prod-api-01", to_version="3.1.4")
-    assert "sensitive-approval" not in str(error.value)
-    assert "sensitive-approval" not in str(trace.events)
+    assert token not in str(error.value)
+    assert token not in str(trace.events)
+
+
+def approved_gateway(sim, trace, tools_class=InfrastructureTools):
+    import tempfile
+    from app.platform.enterprise import DurableRunStore
+    from app.orchestration.enterprise_workflow import EnterpriseOpsWorkflow
+    from app.security.approvals import ApprovalStore
+    store = DurableRunStore(tempfile.mktemp(suffix=".db"))
+    workflow = EnterpriseOpsWorkflow(sim, store)
+    record = workflow.investigate("platform-sre", "prod-api-01", "CVE-DEMO-2026-001")
+    approvals = ApprovalStore(store)
+    token = approvals.claim(record["run_id"], "platform-sre", "alice")
+    return MCPToolGateway(tools_class(sim), CapabilityRegistry(), trace,
+                          approvals=approvals, run_id=record["run_id"]), token
