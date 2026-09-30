@@ -2,6 +2,9 @@ import uuid
 
 from app.security.approvals import ApprovalStore
 from app.observability.tracing import Trace
+from app.storage.repositories import AuditRepository
+from app.storage.simulator import DurableSimulator
+from app.security.approvals import ExecutionConflict
 
 from app.domain.models import Status
 from app.platform.enterprise import (
@@ -16,9 +19,10 @@ from app.orchestration.langgraph_workflow import (
 
 
 class EnterpriseOpsWorkflow:
-    def __init__(self, simulator, store=None):
-        self.simulator = simulator
+    def __init__(self, simulator=None, store=None):
         self.store = store or DurableRunStore()
+        self.simulator = simulator or DurableSimulator(self.store).seed()
+        self.audit = AuditRepository(self.store)
         self.registry = CapabilityRegistry()
         self.router = ModelRouter()
         self.approvals = ApprovalStore(self.store)
@@ -53,6 +57,8 @@ class EnterpriseOpsWorkflow:
             agent_id=agent_id,
             inject_failure=inject_failure,
             identity=identity,
+            trace=Trace(lambda event: self.audit.append(run_id, tenant_id, event)),
+            run_id=run_id,
         )
 
         status = (
@@ -88,101 +94,71 @@ class EnterpriseOpsWorkflow:
 
         return self.store.get(run_id, tenant_id)
 
-    def approve_and_execute(
-        self,
-        run_id,
-        approver,
-        *,
-        tenant_id,
-    ):
-        """
-        Resume a persisted WAITING_APPROVAL workflow.
-
-        The execution lifecycle is now orchestrated by LangGraph:
-
-        approval
-          -> execute
-          -> verify
-          -> succeed
-
-        or:
-
-        approval
-          -> execute
-          -> verify
-          -> rollback
-          -> escalate
-
-        Infrastructure mutations still pass through ToolGateway.
-        """
-
+    def _record(self, run_id, tenant_id):
         record = self.store.get(run_id, tenant_id)
-        if not record:
-            raise KeyError("run not found")
-        plan = record["payload"]["plan"]
-        if self.simulator.get_host(plan["host_id"])["tenant_id"] != tenant_id:
+        if not record: raise KeyError("run not found")
+        if self.simulator.get_host(record["payload"]["host_id"])["tenant_id"] != tenant_id:
             raise PermissionError("host belongs to another tenant")
-        approval_token = self.approvals.claim(run_id, tenant_id, approver)
-        if approval_token is None:
-            return self.store.get(run_id, tenant_id)
+        return record
+
+    def approve_and_execute(self, run_id, approver, *, tenant_id):
+        self._record(run_id, tenant_id)
+        owner = str(uuid.uuid4())
+        token = self.approvals.claim(run_id, tenant_id, approver, worker_owner=owner)
+        if token is None: return self.store.get(run_id, tenant_id)
+        return self._execute(run_id, tenant_id, approver, token, owner)
+
+    def recover(self, run_id, approver, *, tenant_id):
+        record = self._record(run_id, tenant_id)
+        if record["status"] in ("SUCCEEDED", "ROLLED_BACK"):
+            return record
+        owner = str(uuid.uuid4())
+        # Authenticated reapproval rotates expired grants; active workers cannot be stolen.
+        token = self.approvals.recover_grant(run_id, tenant_id, approver, owner)
+        try:
+            backend = self.simulator.for_run(run_id) if hasattr(self.simulator, "for_run") else self.simulator
+            for capability, status in self.approvals.operations(run_id).items():
+                if status in ("STARTED", "UNKNOWN"):
+                    receipt = backend.reconcile(capability) if hasattr(backend, "reconcile") else None
+                    if not receipt or receipt.get("status") != "SUCCEEDED":
+                        raise ExecutionConflict("backend outcome unresolved; mutation will not be replayed")
+                    self.approvals.reconcile_result(run_id, capability, receipt["result"])
+            self.audit.append(run_id, tenant_id, {"ts":self.store.timestamp(), "event":"workflow.recovering", "detail":"durable checkpoint and receipts validated"})
+        except Exception:
+            record = self.store.get(run_id, tenant_id)
+            record["payload"]["operations"] = self.approvals.operations(run_id)
+            self.approvals.escalate_owned(run_id, tenant_id, record["autonomy"], record["payload"], owner)
+            self.approvals.release_worker(run_id, owner)
+            raise
+        return self._execute(run_id, tenant_id, approver, token, owner, resume=True)
+
+    def _events(self, record):
+        items = record["payload"].get("events", []) + self.audit.list(record["run_id"], record["tenant_id"])
+        import json
+        unique = {json.dumps(item, sort_keys=True): item for item in items}
+        return sorted(unique.values(), key=lambda e:e["ts"])
+
+    def _execute(self, run_id, tenant_id, approver, token, owner, resume=False):
         record = self.store.get(run_id, tenant_id)
         self.simulator.fail_validation = record["payload"].get("inject_failure", False)
-        execution_trace = Trace()
+        trace = Trace(lambda event: self.audit.append(run_id, tenant_id, event))
         try:
-            result = run_execution(
-                simulator=self.simulator,
-                tenant_id=tenant_id,
-                plan=plan,
-                approver=approver,
-                approval_token=approval_token,
-                approvals=self.approvals,
-                run_id=run_id,
-                trace=execution_trace,
-            )
+            result = run_execution(simulator=self.simulator, tenant_id=tenant_id,
+                plan=record["payload"]["plan"], approver=approver, approval_token=token,
+                approvals=self.approvals, run_id=run_id, trace=trace, resume=resume, worker_owner=owner)
+            status = result["status"]
+            if status not in ("SUCCEEDED", "ROLLED_BACK", "WAITING_EXTERNAL"):
+                raise RuntimeError("execution ended without a verified terminal outcome")
+            record["payload"].update(
+                events=self._events(record), postcheck=result["postcheck"],
+                execution_result=result.get("execution_result"), execution_orchestrator="langgraph",
+                operations=self.approvals.operations(run_id))
+            self.approvals.complete(run_id, tenant_id, status, record["autonomy"], record["payload"], worker_owner=owner)
         except Exception:
-            # Do not resume/retry a possibly completed mutation after transport failure.
-            record["payload"]["operations"] = self.approvals.operations(run_id)
-            record["payload"]["events"] += execution_trace.events
-            record["payload"]["events"].append({
-                "ts": self.store.timestamp(), "event": "incident.escalated",
-                "detail": "execution interrupted; reconciliation required",
-            })
-            self.store.save(run_id, tenant_id, Status.ESCALATED.value, record["autonomy"], record["payload"])
+            trace.add("incident.escalated", "execution interrupted; reconciliation required")
+            record["payload"].update(events=self._events(record), operations=self.approvals.operations(run_id))
+            self.approvals.escalate_owned(run_id, tenant_id, record["autonomy"], record["payload"], owner)
             raise
-
-        if result["status"] == "SUCCEEDED":
-            status = Status.SUCCEEDED
-
-        elif result["status"] == "ROLLED_BACK":
-            status = Status.ROLLED_BACK
-
-        else:
-            raise RuntimeError(
-                "execution graph ended in "
-                f"unexpected state: {result['status']}"
-            )
-
-        # Preserve the original investigation event history
-        # and append the execution graph history.
-        record["payload"]["events"] += (
-            result["trace"].events
-        )
-
-        record["payload"]["postcheck"] = (
-            result["postcheck"]
-        )
-
-        record["payload"][
-            "execution_orchestrator"
-        ] = "langgraph"
-
-        record["payload"]["operations"] = self.approvals.operations(run_id)
-        self.approvals.complete(
-            run_id,
-            record["tenant_id"],
-            status.value,
-            record["autonomy"],
-            record["payload"],
-        )
-
+        finally:
+            self.approvals.release_worker(run_id, owner)
         return self.store.get(run_id, tenant_id)

@@ -9,9 +9,13 @@ spec:
     spec:
       containers:
       - name: api
-        image: opspilot:0.1.0
+        image: opspilot:0.7.0
+        envFrom:
+        - secretRef: {name: opspilot-config}
+        securityContext: {runAsNonRoot: true, runAsUser: 10001, allowPrivilegeEscalation: false}
+        livenessProbe: {httpGet: {path: /health, port: 8000}, initialDelaySeconds: 10, periodSeconds: 10}
         ports: [{containerPort: 8000}]
-        readinessProbe: {httpGet: {path: /health, port: 8000}, initialDelaySeconds: 3, periodSeconds: 10}
+        readinessProbe: {httpGet: {path: /ready, port: 8000}, initialDelaySeconds: 3, periodSeconds: 10}
         resources:
           requests: {cpu: "250m", memory: "256Mi"}
           limits: {cpu: "1", memory: "1Gi"}

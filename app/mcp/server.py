@@ -11,11 +11,12 @@ from app.mcp.contracts import CONTRACTS
 from app.platform.enterprise import AgentIdentity, CapabilityRegistry, ToolGateway
 from app.observability.tracing import Trace
 from app.tools.infrastructure import InfrastructureTools
-from simulator.infrastructure import InfrastructureSimulator
+from app.tools.providers import configured_backend
+from app.platform.enterprise import DurableRunStore
 
 
 def create_server(tools, identity, trace, approval_token=None, *, approvals=None, run_id=None):
-    server = Server("opspilot-infrastructure", version="0.5.0")
+    server = Server("opspilot-infrastructure", version="0.7.0")
     registry = CapabilityRegistry()
     gateway = ToolGateway(tools, registry, trace, approvals=approvals, run_id=run_id)
 
@@ -40,7 +41,7 @@ def create_server(tools, identity, trace, approval_token=None, *, approvals=None
             if name not in CONTRACTS:
                 raise LookupError("unknown capability")
             args = CONTRACTS[name].model_validate(arguments).model_dump()
-            data = gateway.invoke(identity, name, approval_token=approval_token, **args)
+            data = await asyncio.to_thread(gateway.invoke, identity, name, approval_token=approval_token, **args)
             payload = {"data": data}
             return types.CallToolResult(
                 content=[types.TextContent(type="text", text=json.dumps(payload))],
@@ -66,8 +67,8 @@ def create_server(tools, identity, trace, approval_token=None, *, approvals=None
 async def main():
     # Standalone local server is read-only. No caller-supplied identities or approvals.
     server = create_server(
-        InfrastructureTools(InfrastructureSimulator()),
-        AgentIdentity("mcp-local-observer", "platform-sre", ("observer",), ("production",)),
+        InfrastructureTools(configured_backend(DurableRunStore())),
+        AgentIdentity("mcp-local-observer", "platform-sre", ("observer",), ("production", "nonproduction")),
         Trace(),
     )
     async with stdio_server() as (read, write):

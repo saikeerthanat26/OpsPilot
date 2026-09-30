@@ -55,7 +55,7 @@ Then open `/docs`.
 The interesting output is not prose. It is the **execution trajectory**: evidence → decision → policy → approval → tool invocation → verification → rollback/success. The same control plane can later support Slack, web, API, ServiceNow/Jira, OpenStack, Kubernetes, or cloud interfaces without coupling orchestration to a single channel.
 
 ## Production evolution
-The local implementation deliberately uses an in-process state store and simulator so anyone can run it. The documented production target replaces those seams with PostgreSQL/durable workflow storage, queue-backed workers, real MCP servers, OIDC/RBAC, secrets management, OpenTelemetry/Prometheus/Grafana, Kubernetes, and provider-independent OSS inference (for example vLLM) or managed fallback.
+The enterprise API uses durable SQL storage and LangGraph checkpoints, with a safe simulator by default and opt-in Kubernetes, AWS, Terraform and GitHub providers. PostgreSQL supports shared control-plane state across replicas. Queue-backed workers, OIDC, centralized secrets, telemetry and model routing remain future milestones.
 
 See `ARCHITECTURE.md`, `INTERVIEW_DEFENSE.md`, and `docs/adr/`.
 
@@ -108,3 +108,76 @@ Run `python -m pytest -q` and `python -m evals.run_evals` to verify security and
 legacy/enterprise patch and rollback scenarios. Use TLS and replace the local identity
 resolver with OIDC before remote deployment. See
 [ADR-006](docs/adr/ADR-006-approval-grants-tenant-isolation.md) for recovery and storage limits.
+
+
+## V0.6 / V0.7 — persistence, recovery and governed providers
+
+V0.6 persists runs, approval grants, operation results, host leases, simulator inventory,
+rollback snapshots, backend receipts, audit events and official LangGraph checkpoints.
+SQLite supports local use; PostgreSQL supports shared state across API replicas.
+V0.7 adds configured Kubernetes, AWS SSM, Terraform and GitHub capabilities behind the
+same MCP authorization boundary. These adapters require your own target inventory and
+least-privilege credentials; CI uses contract fakes rather than live cloud accounts.
+
+```bash
+python -m pip install -r requirements.txt
+export OPSPILOT_DATABASE_URL="sqlite:////tmp/opspilot.db"
+python -m app.storage.bootstrap
+python -m pytest -q
+python -m evals.run_evals
+uvicorn app.api.main:app --reload
+```
+
+Keep the V0.5 bearer identity configuration above. For PostgreSQL, set
+`OPSPILOT_DATABASE_URL=postgresql://user:password@host:5432/opspilot` and run bootstrap
+before starting the API. URL-encode credentials containing URL delimiters.
+Existing V0.5 SQLite files receive additive tables; bootstrap records the Alembic
+baseline and initializes checkpoints. Switching URLs does **not** copy your old data.
+Back up the database before migrations; automatic downgrade intentionally refuses to
+remove operational records.
+
+For a local PostgreSQL deployment, generate an alphanumeric database password and
+reuse the bearer identity configuration above:
+
+```bash
+export OPSPILOT_DB_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(24))')"
+docker compose up --build -d
+```
+
+Compose keeps PostgreSQL data in a named volume. The Kubernetes deployment example
+requires an `opspilot-config` Secret containing `OPSPILOT_DATABASE_URL` and
+`OPSPILOT_API_IDENTITIES`, pointing both replicas at the same PostgreSQL database.
+`/ready` checks database connectivity. Work still executes in the requesting process;
+there is no background queue or automatic recovery scheduler.
+
+Inspect `GET /v2/runs/<id>/checkpoint` for the latest status and pending graph nodes.
+After a process restart, an authenticated, scoped approver sends `{}` to
+`POST /v2/runs/<id>/recover`. A live execution-worker lease blocks recovery; after
+an actual worker crash, its lease expires in five minutes. Recovery rotates the grant
+and reconciles started/unknown operations before resuming the graph. A proven result
+is reused. An unproven mutation remains `ESCALATED`, retains the host lease and returns
+409; inspect the external system and audit trail instead of deleting ledger records.
+Read events through `GET /v2/runs/<id>/events` after a restart.
+
+Set `OPSPILOT_INVENTORY_FILE` to a trusted JSON file to opt into providers; see
+[provider setup](docs/PROVIDERS.md). Ownership/provider bindings cannot be reassigned
+by loading another file, and existing payloads are not overwritten on startup.
+Treat inventory changes as administrative database changes requiring review.
+
+GitHub creates a draft PR and records `WAITING_EXTERNAL`; a human reviews and merges,
+then `/recover` verifies the configured base branch without recreating the PR.
+Terraform applies a SHA-256-bound saved plan for exactly one update; failures need a
+new reviewed plan instead of automatic rollback. Kubernetes restores the original
+image and AWS invokes the configured rollback document when postchecks fail.
+
+CI runs the simulator/security/provider suite, restart evaluations and a separate
+real PostgreSQL 16 job. To run PostgreSQL checks locally:
+
+```bash
+OPSPILOT_TEST_POSTGRES_URL=postgresql://user:password@localhost:5432/disposable_test_db python -m pytest -q tests/test_postgres.py
+```
+
+The integration fixture clears control-plane tables: use a dedicated disposable test
+DB. Live cloud permissions, rollout behavior and SSM document implementation must be
+validated in your staging environment. See [ADR-007](docs/adr/ADR-007-durable-recovery.md)
+and [ADR-008](docs/adr/ADR-008-governed-providers.md).

@@ -16,7 +16,7 @@ class MCPToolError(RuntimeError):
 
 
 class MCPToolGateway:
-    def __init__(self, tools, registry, trace, timeout_seconds=10, *, approvals=None, run_id=None):
+    def __init__(self, tools, registry, trace, timeout_seconds=180, *, approvals=None, run_id=None):
         self.tools, self.registry, self.trace = tools, registry, trace
         self.timeout_seconds = timeout_seconds
         self.approvals, self.run_id = approvals, run_id
