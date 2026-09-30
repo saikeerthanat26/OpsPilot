@@ -32,13 +32,17 @@ class CapabilityRegistry:
     def get(self, name): return self._caps[name]
 
 class ToolGateway:
-    """Enterprise capability boundary: identity, tenant, role and approval checks wrap narrow tools."""
+    """Capability boundary: role, environment scope and approval presence wrap narrow tools."""
     def __init__(self, tools, registry, trace): self.tools, self.registry, self.trace = tools, registry, trace
     def invoke(self, identity: AgentIdentity, capability: str, *, approval_token: str|None=None, **kwargs):
         cap = self.registry.get(capability)
         if cap.required_role not in identity.roles and "admin" not in identity.roles:
             self.trace.add("tool.denied", f"agent={identity.agent_id}, capability={capability}, reason=role")
             raise PermissionError(f"agent lacks role {cap.required_role}")
+        environment = self.tools.get_host_health(kwargs["host_id"])["environment"]
+        if environment not in identity.environment_scopes:
+            self.trace.add("tool.denied", f"agent={identity.agent_id}, capability={capability}, reason=environment")
+            raise PermissionError("agent lacks environment scope")
         if cap.mutating and not approval_token:
             self.trace.add("tool.denied", f"agent={identity.agent_id}, capability={capability}, reason=approval")
             raise PermissionError("approval token required for mutating capability")

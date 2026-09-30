@@ -11,8 +11,8 @@ from app.platform.enterprise import (
     AgentIdentity,
     CapabilityRegistry,
     ModelRouter,
-    ToolGateway,
 )
+from app.mcp.client import MCPToolGateway, PlanningTools
 from app.policy.engine import PolicyEngine
 from app.retrieval.knowledge import KnowledgeService
 from app.tools.infrastructure import InfrastructureTools
@@ -115,7 +115,7 @@ def gather_evidence(state: OpsPilotState) -> dict:
         state["simulator"]
     )
 
-    gateway = ToolGateway(
+    gateway = MCPToolGateway(
         tools,
         CapabilityRegistry(),
         trace,
@@ -192,7 +192,8 @@ def create_plan(state: OpsPilotState) -> dict:
         state["simulator"]
     )
 
-    plan = RemediationPlanner(tools).plan(
+    gateway = MCPToolGateway(tools, CapabilityRegistry(), trace)
+    plan = RemediationPlanner(PlanningTools(gateway, state["identity"])).plan(
         state["host_id"],
         state["cve"],
     )
@@ -326,7 +327,7 @@ def execute_patch(
         state["simulator"]
     )
 
-    gateway = ToolGateway(
+    gateway = MCPToolGateway(
         tools,
         CapabilityRegistry(),
         state["trace"],
@@ -356,7 +357,7 @@ def verify_health(
         state["simulator"]
     )
 
-    gateway = ToolGateway(
+    gateway = MCPToolGateway(
         tools,
         CapabilityRegistry(),
         state["trace"],
@@ -406,7 +407,7 @@ def rollback(
         state["simulator"]
     )
 
-    gateway = ToolGateway(
+    gateway = MCPToolGateway(
         tools,
         CapabilityRegistry(),
         state["trace"],
