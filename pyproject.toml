@@ -1,0 +1,10 @@
+[project]
+name = "opspilot"
+version = "0.1.0"
+description = "Governed Agentic SRE control plane reference implementation"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
