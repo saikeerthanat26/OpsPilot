@@ -1,0 +1,16 @@
+[
+  {
+    "id": "critical-prod-cve",
+    "host": "prod-api-01",
+    "cve": "CVE-DEMO-2026-001",
+    "expected_autonomy": "L2_APPROVAL_REQUIRED",
+    "expected_status": "SUCCEEDED"
+  },
+  {
+    "id": "failed-postcheck",
+    "host": "prod-api-01",
+    "cve": "CVE-DEMO-2026-001",
+    "inject_failure": true,
+    "expected_status": "ROLLED_BACK"
+  }
+]
