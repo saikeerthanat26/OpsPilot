@@ -1,7 +1,8 @@
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Any
-import json, os, sqlite3, uuid
+import json, os, uuid
+from app.storage.database import Database
 
 @dataclass(frozen=True)
 class AgentIdentity:
@@ -73,7 +74,7 @@ class ToolGateway:
                 self.approvals.finish(self.run_id, capability, "UNKNOWN")
             raise
         if cap.mutating:
-            self.approvals.finish(self.run_id, capability, "SUCCEEDED")
+            self.approvals.finish(self.run_id, capability, "SUCCEEDED", result)
         self.trace.add("tool.completed", f"capability={capability}")
         return result
 
@@ -85,11 +86,12 @@ class ModelRouter:
 
 class DurableRunStore:
     def __init__(self, path: str|None=None):
-        self.path = path or os.getenv("OPSPILOT_DB", "/tmp/opspilot.db")
+        self.path = path or os.getenv("OPSPILOT_DATABASE_URL") or os.getenv("OPSPILOT_DB", "/tmp/opspilot.db")
+        self.database = Database(self.path)
         self._init()
     @staticmethod
     def timestamp(): return datetime.now(timezone.utc).isoformat()
-    def _connect(self): return sqlite3.connect(self.path, timeout=15)
+    def _connect(self): return self.database.connect()
     def _init(self):
         with self._connect() as c:
             c.execute("CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, tenant_id TEXT, status TEXT, autonomy TEXT, payload TEXT, created_at TEXT, updated_at TEXT)")

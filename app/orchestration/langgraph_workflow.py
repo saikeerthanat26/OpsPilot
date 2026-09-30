@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, TypedDict
+from dataclasses import asdict
 
 from langgraph.graph import END, START, StateGraph
 
@@ -114,9 +115,8 @@ def route_model(state: OpsPilotState) -> dict:
 def gather_evidence(state: OpsPilotState) -> dict:
     trace = state["trace"]
 
-    tools = InfrastructureTools(
-        state["simulator"]
-    )
+    backend = state["simulator"]
+    tools = InfrastructureTools(backend.for_run(state.get("run_id")) if hasattr(backend, "for_run") else backend)
 
     gateway = MCPToolGateway(
         tools,
@@ -191,9 +191,8 @@ def gather_evidence(state: OpsPilotState) -> dict:
 def create_plan(state: OpsPilotState) -> dict:
     trace = state["trace"]
 
-    tools = InfrastructureTools(
-        state["simulator"]
-    )
+    backend = state["simulator"]
+    tools = InfrastructureTools(backend.for_run(state.get("run_id")) if hasattr(backend, "for_run") else backend)
 
     gateway = MCPToolGateway(tools, CapabilityRegistry(), trace)
     plan = RemediationPlanner(PlanningTools(gateway, state["identity"])).plan(
@@ -326,9 +325,8 @@ def execute_patch(
     approval enforcement.
     """
 
-    tools = InfrastructureTools(
-        state["simulator"]
-    )
+    backend = state["simulator"]
+    tools = InfrastructureTools(backend.for_run(state.get("run_id")) if hasattr(backend, "for_run") else backend)
 
     gateway = MCPToolGateway(
         tools,
@@ -338,6 +336,9 @@ def execute_patch(
     )
 
     plan = state["plan"]
+    if state["approvals"].operations(state["run_id"]).get("execute_approved_patch") == "SUCCEEDED":
+        state["trace"].add("execution.reused", "durable patch result; mutation not replayed")
+        return {"execution_result": state["approvals"].result(state["run_id"], "execute_approved_patch"), "status": "EXECUTED"}
 
     result = gateway.invoke(
         state["executor_identity"],
@@ -357,9 +358,8 @@ def verify_health(
     state: OpsPilotState,
 ) -> dict:
 
-    tools = InfrastructureTools(
-        state["simulator"]
-    )
+    backend = state["simulator"]
+    tools = InfrastructureTools(backend.for_run(state.get("run_id")) if hasattr(backend, "for_run") else backend)
 
     gateway = MCPToolGateway(
         tools,
@@ -384,10 +384,17 @@ def route_after_verification(
     state: OpsPilotState,
 ) -> str:
 
+    if state["postcheck"].get("pending_external"):
+        return "wait_external"
     if state["postcheck"]["healthy"]:
         return "succeed"
 
     return "rollback"
+
+
+def wait_external(state):
+    state["trace"].add("external.review.required", "change request created; remediation awaits human review/merge")
+    return {"status":"WAITING_EXTERNAL"}
 
 
 def succeed(
@@ -408,9 +415,8 @@ def rollback(
     state: OpsPilotState,
 ) -> dict:
 
-    tools = InfrastructureTools(
-        state["simulator"]
-    )
+    backend = state["simulator"]
+    tools = InfrastructureTools(backend.for_run(state.get("run_id")) if hasattr(backend, "for_run") else backend)
 
     gateway = MCPToolGateway(
         tools,
@@ -419,6 +425,10 @@ def rollback(
         approvals=state.get("approvals"), run_id=state.get("run_id"),
     )
 
+    if state["approvals"].operations(state["run_id"]).get("rollback_patch") == "SUCCEEDED":
+        return {"rollback_result": state["approvals"].result(state["run_id"], "rollback_patch"), "status": "ROLLING_BACK"}
+    if not state["plan"].get("rollback_available", True):
+        raise PermissionError("backend requires separate recovery authorization; no automatic rollback")
     result = gateway.invoke(
         state["executor_identity"],
         "rollback_patch",
@@ -521,32 +531,47 @@ def build_investigation_graph():
 # EXECUTION / RESUME GRAPH
 # ============================================================
 
-def build_execution_graph():
+def build_execution_graph(runtime=None, checkpointer=None):
+    def bind(fn):
+        if runtime is None: return fn
+        def node(state):
+            if runtime.get("worker_owner"):
+                runtime["approvals"].renew_worker(runtime["run_id"], runtime["worker_owner"])
+            ephemeral = {**state, **runtime}
+            if isinstance(ephemeral.get("executor_identity"), dict):
+                ephemeral["executor_identity"] = AgentIdentity(**ephemeral["executor_identity"])
+            result = fn(ephemeral)
+            if isinstance(result.get("executor_identity"), AgentIdentity):
+                result["executor_identity"] = asdict(result["executor_identity"])
+            return result
+        return node
+
     graph = StateGraph(OpsPilotState)
 
     graph.add_node(
         "grant_approval",
-        grant_approval,
+        bind(grant_approval),
     )
     graph.add_node(
         "execute_patch",
-        execute_patch,
+        bind(execute_patch),
     )
     graph.add_node(
         "verify_health",
-        verify_health,
+        bind(verify_health),
     )
+    graph.add_node("wait_external", bind(wait_external))
     graph.add_node(
         "succeed",
-        succeed,
+        bind(succeed),
     )
     graph.add_node(
         "rollback",
-        rollback,
+        bind(rollback),
     )
     graph.add_node(
         "escalate",
-        escalate,
+        bind(escalate),
     )
 
     graph.add_edge(
@@ -569,10 +594,12 @@ def build_execution_graph():
         route_after_verification,
         {
             "succeed": "succeed",
+            "wait_external": "wait_external",
             "rollback": "rollback",
         },
     )
 
+    graph.add_edge("wait_external", END)
     graph.add_edge(
         "succeed",
         END,
@@ -588,7 +615,7 @@ def build_execution_graph():
         END,
     )
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 investigation_graph = (
@@ -613,9 +640,11 @@ def run_investigation(
     agent_id: str = "sre-investigator",
     inject_failure: bool = False,
     identity=None,
+    trace=None,
+    run_id=None,
 ):
 
-    trace = Trace()
+    trace = trace or Trace()
 
     initial_state: OpsPilotState = {
         "tenant_id": tenant_id,
@@ -623,6 +652,7 @@ def run_investigation(
         "cve": cve,
         "agent_id": agent_id,
         "trusted_identity": identity,
+        "run_id": run_id,
         "inject_failure": inject_failure,
         "simulator": simulator,
         "trace": trace,
@@ -633,32 +663,23 @@ def run_investigation(
     )
 
 
-def run_execution(
-    *,
-    simulator,
-    tenant_id: str,
-    plan: dict[str, Any],
-    approver: str,
-    approval_token: str,
-    approvals,
-    run_id: str,
-    trace=None,
-):
-
+def run_execution(*, simulator, tenant_id, plan, approver, approval_token,
+                  approvals, run_id, trace=None, resume=False, worker_owner=None):
     trace = trace or Trace()
-
-    initial_state: OpsPilotState = {
-        "tenant_id": tenant_id,
-        "plan": plan,
-        "approver": approver,
-        "approval_token": approval_token,
-        "approvals": approvals,
-        "run_id": run_id,
-        "approved": True,
-        "simulator": simulator,
-        "trace": trace,
-    }
-
-    return execution_graph.invoke(
-        initial_state
-    )
+    # Runtime objects and approval credentials never enter persisted graph state.
+    runtime = {"simulator": simulator, "trace": trace, "approvals": approvals,
+               "approval_token": approval_token, "run_id": run_id, "worker_owner": worker_owner}
+    initial = {"tenant_id": tenant_id, "plan": plan, "approver": approver,
+               "approved": True, "run_id": run_id}
+    config = {"configurable": {"thread_id": run_id}}
+    with approvals.runs.database.checkpointer() as saver:
+        graph = build_execution_graph(runtime, saver)
+        snapshot = graph.get_state(config)
+        if resume and snapshot.values:
+            if snapshot.values.get("status")=="WAITING_EXTERNAL":
+                graph.update_state(config, {"status":"EXECUTED"}, as_node="execute_patch")
+                snapshot=graph.get_state(config)
+            result = graph.invoke(None, config) if snapshot.next else snapshot.values
+        else:
+            result = graph.invoke(initial, config)
+    return {**result, "trace": trace}
