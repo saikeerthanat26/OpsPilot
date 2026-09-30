@@ -5,7 +5,7 @@ from app.orchestration.enterprise_workflow import EnterpriseOpsWorkflow
 from app.platform.enterprise import CapabilityRegistry, DurableRunStore
 from simulator.infrastructure import InfrastructureSimulator
 
-app=FastAPI(title="OpsPilot Enterprise Agentic SRE Control Plane",version="0.2.0",description="Policy-governed agentic SRE platform with durable workflows, agent identity and a capability gateway.")
+app=FastAPI(title="OpsPilot Enterprise Agentic SRE Control Plane",version="0.4.0",description="Policy-governed agentic SRE platform with durable workflows, agent identity and a capability gateway.")
 store=DurableRunStore()
 
 class IncidentRequest(BaseModel):
@@ -16,9 +16,9 @@ class EnterpriseIncidentRequest(BaseModel):
 class ApprovalRequest(BaseModel): approver:str="oncall-sre@example.com"
 
 @app.get("/")
-def root(): return {"service":"OpsPilot","version":"0.2.0","purpose":"Enterprise Agentic SRE Control Plane","docs":"/docs"}
+def root(): return {"service":"OpsPilot","version":"0.4.0","purpose":"Enterprise Agentic SRE Control Plane","docs":"/docs"}
 @app.get("/health")
-def health(): return {"status":"ok","version":"0.2.0"}
+def health(): return {"status":"ok","version":"0.4.0"}
 @app.get("/ready")
 def ready(): return {"status":"ready","durable_store":"sqlite"}
 @app.get("/v1/capabilities")

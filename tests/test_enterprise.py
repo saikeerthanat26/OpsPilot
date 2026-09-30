@@ -18,6 +18,7 @@ def test_approval_executes_and_verifies():
     done=w.approve_and_execute(r["run_id"],"alice")
     assert done["status"]=="SUCCEEDED"
     assert any(e["event"]=="tool.invoked" for e in done["payload"]["events"])
+    assert any(e["event"]=="mcp.call.completed" for e in done["payload"]["events"])
 
 def test_failed_postcheck_rolls_back():
     w=wf(True); r=w.investigate("team-a","prod-api-01","CVE-DEMO-2026-001",inject_failure=True)

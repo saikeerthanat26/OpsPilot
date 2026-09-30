@@ -21,6 +21,7 @@ OpsPilot demonstrates that transition with one end-to-end SRE use case: investig
 Requires Python 3.11+.
 
 ```bash
+pip install -r requirements.txt
 python demo.py
 python demo.py --failure
 python -m pytest -q
@@ -57,3 +58,26 @@ The interesting output is not prose. It is the **execution trajectory**: evidenc
 The local implementation deliberately uses an in-process state store and simulator so anyone can run it. The documented production target replaces those seams with PostgreSQL/durable workflow storage, queue-backed workers, real MCP servers, OIDC/RBAC, secrets management, OpenTelemetry/Prometheus/Grafana, Kubernetes, and provider-independent OSS inference (for example vLLM) or managed fallback.
 
 See `ARCHITECTURE.md`, `INTERVIEW_DEFENSE.md`, and `docs/adr/`.
+
+## V0.4 — MCP boundary
+
+Enterprise workflows now send all infrastructure calls through a real MCP session,
+including planner reads, approved patching, verification and rollback. The server
+validates strict tool arguments and enforces ToolGateway authorization. The default
+transport uses in-memory protocol streams so the local simulator remains shared.
+
+Run the separate read-only stdio server from the repository root:
+
+```bash
+python -m app.mcp.server
+```
+
+Connect an MCP client with command `python` and arguments `-m app.mcp.server`, using
+the repository root as its working directory. Stdout is reserved for protocol messages.
+
+```bash
+python -m pytest -q
+```
+
+See [ADR-005](docs/adr/ADR-005-mcp-capability-boundary.md) for the trust model,
+transport choices and remaining production authorization requirements.
